@@ -1,5 +1,6 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::net::Ipv6Addr;
+use std::{fmt, iter};
 
 use common::DateTime;
 use serde_json::Map;
@@ -150,7 +151,7 @@ impl TantivyDocument {
     }
 
     /// Add a dynamic object field
-    pub fn add_object(&mut self, field: Field, object: BTreeMap<String, OwnedValue>) {
+    pub fn add_object(&mut self, field: Field, FlatObject(object): FlatObject) {
         self.add_field_value(field, object);
     }
 
@@ -231,6 +232,33 @@ impl TantivyDocument {
             }
         }
         Ok(doc)
+    }
+}
+
+/// A wrapper to deserialize a map as a sequennce of key-value pairs.
+pub struct FlatObject(pub Vec<(String, OwnedValue)>);
+
+impl<'de> serde::de::Deserialize<'de> for FlatObject {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: serde::de::Deserializer<'de> {
+        struct MapVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for MapVisitor {
+            type Value = FlatObject;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a map")
+            }
+
+            fn visit_map<M>(self, mut access: M) -> Result<Self::Value, M::Error>
+            where M: serde::de::MapAccess<'de> {
+                iter::from_fn(|| access.next_entry().transpose())
+                    .collect::<Result<_, _>>()
+                    .map(FlatObject)
+            }
+        }
+
+        deserializer.deserialize_map(MapVisitor)
     }
 }
 

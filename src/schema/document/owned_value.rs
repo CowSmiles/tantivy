@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::fmt;
 use std::net::Ipv6Addr;
 
@@ -183,7 +182,7 @@ impl serde::Serialize for OwnedValue {
             OwnedValue::Bytes(ref bytes) => serializer.serialize_str(&BASE64.encode(bytes)),
             OwnedValue::Object(ref obj) => {
                 let mut map = serializer.serialize_map(Some(obj.len()))?;
-                for &(ref k, ref v) in obj {
+                for (k, v) in obj {
                     map.serialize_entry(k, v)?;
                 }
                 map.end()
@@ -366,10 +365,9 @@ impl From<PreTokenizedString> for OwnedValue {
     }
 }
 
-impl From<BTreeMap<String, OwnedValue>> for OwnedValue {
-    fn from(object: BTreeMap<String, OwnedValue>) -> OwnedValue {
-        let key_values = object.into_iter().collect();
-        OwnedValue::Object(key_values)
+impl From<Vec<(String, OwnedValue)>> for OwnedValue {
+    fn from(object: Vec<(String, OwnedValue)>) -> OwnedValue {
+        OwnedValue::Object(object)
     }
 }
 
