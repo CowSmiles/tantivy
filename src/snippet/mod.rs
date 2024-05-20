@@ -264,7 +264,7 @@ fn select_best_fragment_combination(fragments: &[FragmentCandidate], text: &str)
 
 
 fn select_best_fragments(fragments: &[FragmentCandidate], text: &str) -> Vec<Snippet> {
-    let best_fragment_opts: Vec<&FragmentCandidate> = fragments.iter().sorted_by(|left, right| {
+    let mut best_fragment_opts: Vec<&FragmentCandidate> = fragments.iter().sorted_by(|left, right| {
         let cmp_score = left
             .score
             .partial_cmp(&right.score)
@@ -275,6 +275,7 @@ fn select_best_fragments(fragments: &[FragmentCandidate], text: &str) -> Vec<Sni
             cmp_score
         }
     }).collect();
+    best_fragment_opts.reverse();
     let mut snippets = vec![];
     for fragment in best_fragment_opts {
         let fragment_text = &text[fragment.start_offset..fragment.stop_offset];
