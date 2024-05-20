@@ -212,6 +212,10 @@ fn search_fragments(
     let mut fragment = FragmentCandidate::new(0);
     let mut fragments: Vec<FragmentCandidate> = vec![];
     while let Some(next) = token_stream.next() {
+        // Skip tokens that are before the current fragment
+        if next.offset_to < fragment.start_offset {
+            continue;
+        }
         if (next.offset_to - fragment.start_offset) > max_num_chars {
             if fragment.score > 0.0 {
                 fragments.push(fragment)
