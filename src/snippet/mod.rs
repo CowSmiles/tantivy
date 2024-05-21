@@ -263,21 +263,22 @@ fn select_best_fragment_combination(fragments: &[FragmentCandidate], text: &str)
 }
 
 
-fn select_best_fragments(fragments: &[FragmentCandidate], text: &str) -> Vec<Snippet> {
-    let mut best_fragment_opts: Vec<&FragmentCandidate> = fragments.iter().sorted_by(|left, right| {
-        let cmp_score = left
+fn select_best_fragments(fragments: &[FragmentCandidate], text: &str, limit: Option<usize>) -> Vec<Snippet> {
+    // Sort the fragments by score from high to low and then by position.
+    let best_fragment_opts: Vec<&FragmentCandidate> = fragments.iter().sorted_by(|left, right| {
+        let cmp_score = right
             .score
-            .partial_cmp(&right.score)
+            .partial_cmp(&left.score)
             .unwrap_or(Ordering::Equal);
         if cmp_score == Ordering::Equal {
-            (right.start_offset, right.stop_offset).cmp(&(left.start_offset, left.stop_offset))
+            (left.start_offset, left.stop_offset).cmp(&(right.start_offset, right.stop_offset))
         } else {
             cmp_score
         }
     }).collect();
-    best_fragment_opts.reverse();
     let mut snippets = vec![];
-    for fragment in best_fragment_opts {
+    let limit = limit.unwrap_or(best_fragment_opts.len());
+    for fragment in best_fragment_opts.iter().take(limit) {
         let fragment_text = &text[fragment.start_offset..fragment.stop_offset];
         let highlighted = fragment
             .highlighted
@@ -323,7 +324,7 @@ fn collapse_overlapped_ranges(ranges: &[Range<usize>]) -> Vec<Range<usize>> {
     result
 }
 
-fn is_sorted(mut it: impl Iterator<Item = usize>) -> bool {
+fn is_sorted(mut it: impl Iterator<Item=usize>) -> bool {
     if let Some(first) = it.next() {
         let mut prev = first;
         for item in it {
@@ -477,21 +478,21 @@ impl SnippetGenerator {
     }
 
     /// Generates a list of snippets for the given text.
-    pub fn snippets(&self, text: &str) -> Vec<Snippet> {
+    pub fn snippets(&self, text: &str, limit: Option<usize>) -> Vec<Snippet> {
         let fragment_candidates = search_fragments(
             &mut self.tokenizer.clone(),
             text,
             &self.terms_text,
             self.max_num_chars,
         );
-        select_best_fragments(&fragment_candidates[..], text)
+        select_best_fragments(&fragment_candidates[..], text, limit)
     }
 
     /// Generates snippets for the given `Document`.
     ///
     /// This method extract the text associated with the `SnippetGenerator`'s field
     /// and computes a snippet.
-    pub fn snippets_from_doc<D: Document>(&self, doc: &D) -> Vec<Snippet> {
+    pub fn snippets_from_doc<D: Document>(&self, doc: &D, limit: Option<usize>) -> Vec<Snippet> {
         let mut text = String::new();
         for (field, value) in doc.iter_fields_and_values() {
             let value = value as D::Value<'_>;
@@ -505,7 +506,7 @@ impl SnippetGenerator {
             }
         }
 
-        self.snippets(text.trim())
+        self.snippets(text.trim(), limit)
     }
 }
 
@@ -515,7 +516,7 @@ mod tests {
 
     use maplit::btreemap;
 
-    use super::{collapse_overlapped_ranges, search_fragments, select_best_fragment_combination};
+    use super::{collapse_overlapped_ranges, search_fragments, select_best_fragment_combination, select_best_fragments};
     use crate::query::QueryParser;
     use crate::schema::{IndexRecordOption, Schema, TextFieldIndexing, TextOptions, TEXT};
     use crate::snippet::SnippetGenerator;
@@ -565,6 +566,59 @@ Survey in 2016, 2017, and 2018."#;
             "<b>Rust</b> is a systems programming <b>language</b> sponsored by\nMozilla which \
              describes it as a &quot;safe"
         )
+    }
+
+    #[test]
+    fn test_snippets() {
+        let terms = btreemap! {
+            String::from("rust") => 1.0,
+            String::from("language") => 0.9
+        };
+        let fragments = search_fragments(
+            &mut From::from(SimpleTokenizer::default()),
+            TEST_TEXT,
+            &terms,
+            100,
+        );
+        assert_eq!(fragments.len(), 7);
+        let snippets = select_best_fragments(&fragments[..], TEST_TEXT);
+        assert_eq!(snippets.len(), 7);
+
+        assert_eq!(
+            snippets[0].fragment,
+            "Rust is a systems programming language sponsored by\nMozilla which describes it as a \
+             \"safe"
+        );
+        assert_eq!(
+            snippets[1].fragment,
+            "for \"most loved programming language\" in the Stack Overflow Developer\nSurvey in \
+            2016, 2017, and 2018"
+        );
+        assert_eq!(
+            snippets[2].fragment,
+            "for \"most loved programming language\" in the Stack Overflow Developer\nSurvey in \
+            2016, 2017, and 2018"
+        );
+        assert_eq!(
+            snippets[3].fragment,
+            "for \"most loved programming language\" in the Stack Overflow Developer\nSurvey in \
+            2016, 2017, and 2018"
+        );
+        assert_eq!(
+            snippets[4].fragment,
+            "for \"most loved programming language\" in the Stack Overflow Developer\nSurvey in \
+            2016, 2017, and 2018"
+        );
+        assert_eq!(
+            snippets[5].fragment,
+            "for \"most loved programming language\" in the Stack Overflow Developer\nSurvey in \
+            2016, 2017, and 2018"
+        );
+        assert_eq!(
+            snippets[6].fragment,
+            "for \"most loved programming language\" in the Stack Overflow Developer\nSurvey in \
+            2016, 2017, and 2018"
+        );
     }
 
     #[test]
