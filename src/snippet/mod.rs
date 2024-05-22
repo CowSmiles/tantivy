@@ -213,9 +213,10 @@ fn search_fragments(
     let mut fragments: Vec<FragmentCandidate> = vec![];
     while let Some(next) = token_stream.next() {
         // Skip tokens that are before the current fragment
-        if next.offset_to < fragment.start_offset {
-            continue;
-        }
+        // if next.offset_to < fragment.start_offset {
+        //     fragment = FragmentCandidate::new(next.offset_from);
+        //     continue;
+        // }
         if (next.offset_to - fragment.start_offset) > max_num_chars {
             if fragment.score > 0.0 {
                 fragments.push(fragment)
@@ -283,6 +284,9 @@ fn select_best_fragments(fragments: &[FragmentCandidate], text: &str) -> Vec<Sni
             .highlighted
             .iter()
             .map(|item| item.start - fragment.start_offset..item.end - fragment.start_offset)
+            .sorted_by(|left, right| {
+                (left.start, left.end).cmp(&(right.start, right.end))
+            })
             .collect();
         snippets.push(Snippet::new(fragment_text, highlighted));
     }
