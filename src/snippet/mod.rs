@@ -213,10 +213,9 @@ fn search_fragments(
     let mut fragments: Vec<FragmentCandidate> = vec![];
     while let Some(next) = token_stream.next() {
         // Skip tokens that are before the current fragment
-        // if next.offset_to < fragment.start_offset {
-        //     fragment = FragmentCandidate::new(next.offset_from);
-        //     continue;
-        // }
+        if next.offset_to < fragment.start_offset {
+            fragment = FragmentCandidate::new(next.offset_from);
+        }
         if (next.offset_to - fragment.start_offset) > max_num_chars {
             if fragment.score > 0.0 {
                 fragments.push(fragment)
@@ -283,7 +282,9 @@ fn select_best_fragments(fragments: &[FragmentCandidate], text: &str) -> Vec<Sni
         let highlighted = fragment
             .highlighted
             .iter()
-            .map(|item| item.start - fragment.start_offset..item.end - fragment.start_offset)
+            .map(|item| {
+                item.start.max(fragment.start_offset) - fragment.start_offset..item.end.max(fragment.start_offset) - fragment.start_offset
+            })
             .sorted_by(|left, right| {
                 (left.start, left.end).cmp(&(right.start, right.end))
             })
@@ -327,7 +328,7 @@ fn collapse_overlapped_ranges(ranges: &[Range<usize>]) -> Vec<Range<usize>> {
     result
 }
 
-fn is_sorted(mut it: impl Iterator<Item = usize>) -> bool {
+fn is_sorted(mut it: impl Iterator<Item=usize>) -> bool {
     if let Some(first) = it.next() {
         let mut prev = first;
         for item in it {
