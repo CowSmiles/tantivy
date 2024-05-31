@@ -263,7 +263,7 @@ fn select_best_fragment_combination(fragments: &[FragmentCandidate], text: &str)
 }
 
 
-fn select_best_fragments(fragments: &[FragmentCandidate], text: &str) -> Vec<Snippet> {
+fn select_best_fragments(fragments: &[FragmentCandidate], text: &str, limit: usize) -> Vec<Snippet> {
     let mut best_fragment_opts: Vec<&FragmentCandidate> = fragments.iter().sorted_by(|left, right| {
         let cmp_score = left
             .score
@@ -277,7 +277,11 @@ fn select_best_fragments(fragments: &[FragmentCandidate], text: &str) -> Vec<Sni
     }).collect();
     best_fragment_opts.reverse();
     let mut snippets = vec![];
+    let mut count = 0;
     for fragment in best_fragment_opts {
+        if count >= limit {
+            break;
+        }
         let fragment_text = &text[fragment.start_offset..fragment.stop_offset];
         let highlighted = fragment
             .highlighted
@@ -290,6 +294,7 @@ fn select_best_fragments(fragments: &[FragmentCandidate], text: &str) -> Vec<Sni
             })
             .collect();
         snippets.push(Snippet::new(fragment_text, highlighted));
+        count += 1;
     }
     snippets
 }
@@ -482,21 +487,21 @@ impl SnippetGenerator {
     }
 
     /// Generates a list of snippets for the given text.
-    pub fn snippets(&self, text: &str) -> Vec<Snippet> {
+    pub fn snippets(&self, text: &str, limit: usize) -> Vec<Snippet> {
         let fragment_candidates = search_fragments(
             &mut self.tokenizer.clone(),
             text,
             &self.terms_text,
             self.max_num_chars,
         );
-        select_best_fragments(&fragment_candidates[..], text)
+        select_best_fragments(&fragment_candidates[..], text, limit)
     }
 
     /// Generates snippets for the given `Document`.
     ///
     /// This method extract the text associated with the `SnippetGenerator`'s field
     /// and computes a snippet.
-    pub fn snippets_from_doc<D: Document>(&self, doc: &D) -> Vec<Snippet> {
+    pub fn snippets_from_doc<D: Document>(&self, doc: &D, limit: usize) -> Vec<Snippet> {
         let mut text = String::new();
         for (field, value) in doc.iter_fields_and_values() {
             let value = value as D::Value<'_>;
@@ -510,7 +515,7 @@ impl SnippetGenerator {
             }
         }
 
-        self.snippets(text.trim())
+        self.snippets(text.trim(), limit)
     }
 }
 
