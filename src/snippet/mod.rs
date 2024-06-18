@@ -59,6 +59,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
 use htmlescape::encode_minimal;
+use itertools::Itertools;
 
 use crate::query::Query;
 use crate::schema::document::{Document, Value};
@@ -257,6 +258,43 @@ fn select_best_fragment_combination(fragments: &[FragmentCandidate], text: &str)
     }
 }
 
+
+fn select_best_fragments(fragments: &[FragmentCandidate], text: &str, limit: usize) -> Vec<Snippet> {
+    let mut best_fragment_opts: Vec<&FragmentCandidate> = fragments.iter().sorted_by(|left, right| {
+        let cmp_score = left
+            .score
+            .partial_cmp(&right.score)
+            .unwrap_or(Ordering::Equal);
+        if cmp_score == Ordering::Equal {
+            (right.start_offset, right.stop_offset).cmp(&(left.start_offset, left.stop_offset))
+        } else {
+            cmp_score
+        }
+    }).collect();
+    best_fragment_opts.reverse();
+    let mut snippets = vec![];
+    let mut count = 0;
+    for fragment in best_fragment_opts {
+        if count >= limit {
+            break;
+        }
+        let fragment_text = &text[fragment.start_offset..fragment.stop_offset];
+        let highlighted = fragment
+            .highlighted
+            .iter()
+            .map(|item| {
+                item.start.max(fragment.start_offset) - fragment.start_offset..item.end.max(fragment.start_offset) - fragment.start_offset
+            })
+            .sorted_by(|left, right| {
+                (left.start, left.end).cmp(&(right.start, right.end))
+            })
+            .collect();
+        snippets.push(Snippet::new(fragment_text, highlighted));
+        count += 1;
+    }
+    snippets
+}
+
 /// Returns ranges that are collapsed into non-overlapped ranges.
 ///
 /// ## Examples
@@ -442,6 +480,38 @@ impl SnippetGenerator {
             self.max_num_chars,
         );
         select_best_fragment_combination(&fragment_candidates[..], text)
+    }
+
+    /// Generates a list of snippets for the given text.
+    pub fn snippets(&self, text: &str, limit: usize) -> Vec<Snippet> {
+        let fragment_candidates = search_fragments(
+            &mut self.tokenizer.clone(),
+            text,
+            &self.terms_text,
+            self.max_num_chars,
+        );
+        select_best_fragments(&fragment_candidates[..], text, limit)
+    }
+
+    /// Generates snippets for the given `Document`.
+    ///
+    /// This method extract the text associated with the `SnippetGenerator`'s field
+    /// and computes a snippet.
+    pub fn snippets_from_doc<D: Document>(&self, doc: &D, limit: usize) -> Vec<Snippet> {
+        let mut text = String::new();
+        for (field, value) in doc.iter_fields_and_values() {
+            let value = value as D::Value<'_>;
+            if field != self.field {
+                continue;
+            }
+
+            if let Some(val) = value.as_str() {
+                text.push(' ');
+                text.push_str(val);
+            }
+        }
+
+        self.snippets(text.trim(), limit)
     }
 }
 
