@@ -3,7 +3,7 @@ use proptest::collection::vec;
 use proptest::prelude::*;
 
 use super::*;
-use crate::columnar::{merge_columnar, ColumnarReader, MergeRowOrder, StackMergeOrder};
+use crate::columnar::{ColumnarReader, MergeRowOrder, StackMergeOrder, merge_columnar};
 use crate::{Cardinality, ColumnarWriter, DynamicColumn, HasAssociatedColumnType, RowId};
 
 fn make_columnar<T: Into<NumericalValue> + HasAssociatedColumnType + Copy>(
@@ -403,11 +403,11 @@ fn test_merge_columnar_different_types() {
         panic!()
     };
     assert_eq!(vals.get_cardinality(), Cardinality::Optional);
-    assert_eq!(vals.values_for_doc(0).collect_vec(), vec![]);
-    assert_eq!(vals.values_for_doc(1).collect_vec(), vec![]);
-    assert_eq!(vals.values_for_doc(2).collect_vec(), vec![]);
+    assert_eq!(vals.values_for_doc(0).collect_vec(), Vec::<i64>::new());
+    assert_eq!(vals.values_for_doc(1).collect_vec(), Vec::<i64>::new());
+    assert_eq!(vals.values_for_doc(2).collect_vec(), Vec::<i64>::new());
     assert_eq!(vals.values_for_doc(3).collect_vec(), vec![1]);
-    assert_eq!(vals.values_for_doc(4).collect_vec(), vec![]);
+    assert_eq!(vals.values_for_doc(4).collect_vec(), Vec::<i64>::new());
 
     // text column
     let dynamic_column = cols[1].open().unwrap();

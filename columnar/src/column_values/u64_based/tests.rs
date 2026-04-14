@@ -1,5 +1,6 @@
 use proptest::prelude::*;
 use proptest::{prop_oneof, proptest};
+use rand::Rng;
 
 #[test]
 fn test_serialize_and_load_simple() {
@@ -121,7 +122,7 @@ pub(crate) fn create_and_validate<TColumnCodec: ColumnCodec>(
     assert_eq!(vals, buffer);
 
     if !vals.is_empty() {
-        let test_rand_idx = rand::thread_rng().gen_range(0..=vals.len() - 1);
+        let test_rand_idx = rand::rng().random_range(0..=vals.len() - 1);
         let expected_positions: Vec<u32> = vals
             .iter()
             .enumerate()

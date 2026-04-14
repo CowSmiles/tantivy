@@ -6,13 +6,13 @@ use std::marker::PhantomData;
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
-use common::bounds::{transform_bound_inner_res, TransformBound};
+use common::bounds::{TransformBound, transform_bound_inner_res};
 use common::file_slice::FileSlice;
-use common::{BinarySerializable, OwnedBytes};
-use futures_util::{stream, StreamExt, TryStreamExt};
+use common::{BinarySerializable, ByteCount, OwnedBytes};
+use futures_util::{StreamExt, TryStreamExt, stream};
 use itertools::Itertools;
-use tantivy_fst::automaton::AlwaysMatch;
 use tantivy_fst::Automaton;
+use tantivy_fst::automaton::AlwaysMatch;
 
 use crate::sstable_index_v3::SSTableIndexV3Empty;
 use crate::streamer::{Streamer, StreamerBuilder};
@@ -43,6 +43,7 @@ use crate::{
 pub struct Dictionary<TSSTable: SSTable = VoidSSTable> {
     pub sstable_slice: FileSlice,
     pub sstable_index: SSTableIndex,
+    num_bytes: ByteCount,
     num_terms: u64,
     phantom_data: PhantomData<TSSTable>,
 }
@@ -141,7 +142,7 @@ impl<TSSTable: SSTable> Dictionary<TSSTable> {
             Ok(TSSTable::delta_reader(data))
         } else {
             // if operations are sync, we assume latency is almost null, and there is no point in
-            // merging accross holes
+            // merging across holes
             let blocks = self.get_block_iterator_for_range_and_automaton(key_range, automaton, 0);
             let data = blocks
                 .map(|block_addr| self.sstable_slice.read_bytes_slice(block_addr.byte_range))
@@ -278,6 +279,7 @@ impl<TSSTable: SSTable> Dictionary<TSSTable> {
 
     /// Opens a `TermDictionary`.
     pub fn open(term_dictionary_file: FileSlice) -> io::Result<Self> {
+        let num_bytes = term_dictionary_file.num_bytes();
         let (main_slice, footer_len_slice) = term_dictionary_file.split_from_end(20);
         let mut footer_len_bytes: OwnedBytes = footer_len_slice.read_bytes()?;
         let index_offset = u64::deserialize(&mut footer_len_bytes)?;
@@ -308,16 +310,16 @@ impl<TSSTable: SSTable> Dictionary<TSSTable> {
                 }
             }
             _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("Unsupported sstable version, expected one of [2, 3], found {version}"),
-                ))
+                return Err(io::Error::other(format!(
+                    "Unsupported sstable version, expected one of [2, 3], found {version}"
+                )));
             }
         };
 
         Ok(Dictionary {
             sstable_slice,
             sstable_index,
+            num_bytes,
             num_terms,
             phantom_data: PhantomData,
         })
@@ -342,6 +344,11 @@ impl<TSSTable: SSTable> Dictionary<TSSTable> {
     /// Term ordinals range from 0 to `num_terms() - 1`.
     pub fn num_terms(&self) -> usize {
         self.num_terms as usize
+    }
+
+    /// Returns the total number of bytes used by the dictionary on disk.
+    pub fn num_bytes(&self) -> ByteCount {
+        self.num_bytes
     }
 
     /// Decode a DeltaReader up to key, returning the number of terms traversed
@@ -505,40 +512,65 @@ impl<TSSTable: SSTable> Dictionary<TSSTable> {
     /// Returns the terms for a _sorted_ list of term ordinals.
     ///
     /// Returns true if and only if all terms have been found.
-    pub fn sorted_ords_to_term_cb<F: FnMut(&[u8]) -> io::Result<()>>(
+    pub fn sorted_ords_to_term_cb(
         &self,
-        ord: impl Iterator<Item = TermOrdinal>,
-        mut cb: F,
+        ords: &[TermOrdinal],
+        mut cb: impl FnMut(&[u8]),
     ) -> io::Result<bool> {
+        assert!(ords.is_sorted());
+        let mut ords = ords.iter().copied();
+        let Some(mut ord) = ords.next() else {
+            return Ok(true);
+        };
+
+        // Open the block for the first ordinal.
         let mut bytes = Vec::new();
-        let mut current_block_addr = self.sstable_index.get_block_with_ord(0);
+        let mut current_block_addr = self.sstable_index.get_block_with_ord(ord);
         let mut current_sstable_delta_reader =
             self.sstable_delta_reader_block(current_block_addr.clone())?;
-        let mut current_ordinal = 0;
-        for ord in ord {
-            assert!(ord >= current_ordinal);
-            // check if block changed for new term_ord
-            let new_block_addr = self.sstable_index.get_block_with_ord(ord);
-            if new_block_addr != current_block_addr {
-                current_block_addr = new_block_addr;
-                current_ordinal = current_block_addr.first_ordinal;
-                current_sstable_delta_reader =
-                    self.sstable_delta_reader_block(current_block_addr.clone())?;
-                bytes.clear();
-            }
+        let mut current_block_ordinal = current_block_addr.first_ordinal;
 
-            // move to ord inside that block
-            for _ in current_ordinal..=ord {
+        loop {
+            // move to the ord inside the current block
+            while current_block_ordinal <= ord {
                 if !current_sstable_delta_reader.advance()? {
                     return Ok(false);
                 }
                 bytes.truncate(current_sstable_delta_reader.common_prefix_len());
                 bytes.extend_from_slice(current_sstable_delta_reader.suffix());
+                current_block_ordinal += 1;
             }
-            current_ordinal = ord + 1;
-            cb(&bytes)?;
+            cb(&bytes);
+
+            // fetch the next ordinal
+            let next_ord = loop {
+                let Some(next_ord) = ords.next() else {
+                    return Ok(true);
+                };
+                if next_ord == ord {
+                    // This is the same ordinal, let's just call the callback directly.
+                    cb(&bytes);
+                } else {
+                    // we checked it was sorted beforehands
+                    debug_assert!(next_ord > ord);
+                    break next_ord;
+                }
+            };
+
+            // TODO optimization: it is silly to do a binary search to get the block every single
+            // time.
+            //
+            // Check if block changed for new term_ord
+            let new_block_addr = self.sstable_index.get_block_with_ord(next_ord);
+            if new_block_addr != current_block_addr {
+                current_block_addr = new_block_addr;
+                current_block_ordinal = current_block_addr.first_ordinal;
+                current_sstable_delta_reader =
+                    self.sstable_delta_reader_block(current_block_addr.clone())?;
+                bytes.clear();
+            }
+            ord = next_ord;
         }
-        Ok(true)
     }
 
     /// Returns the number of terms in the dictionary.
@@ -589,12 +621,12 @@ impl<TSSTable: SSTable> Dictionary<TSSTable> {
 
     /// Returns a range builder, to stream all of the terms
     /// within an interval.
-    pub fn range(&self) -> StreamerBuilder<TSSTable> {
+    pub fn range(&self) -> StreamerBuilder<'_, TSSTable> {
         StreamerBuilder::new(self, AlwaysMatch)
     }
 
     /// Returns a range builder filtered with a prefix.
-    pub fn prefix_range<K: AsRef<[u8]>>(&self, prefix: K) -> StreamerBuilder<TSSTable> {
+    pub fn prefix_range<K: AsRef<[u8]>>(&self, prefix: K) -> StreamerBuilder<'_, TSSTable> {
         let lower_bound = prefix.as_ref();
         let mut upper_bound = lower_bound.to_vec();
         for idx in (0..upper_bound.len()).rev() {
@@ -613,7 +645,7 @@ impl<TSSTable: SSTable> Dictionary<TSSTable> {
     }
 
     /// A stream of all the sorted terms.
-    pub fn stream(&self) -> io::Result<Streamer<TSSTable>> {
+    pub fn stream(&self) -> io::Result<Streamer<'_, TSSTable>> {
         self.range().into_stream()
     }
 
@@ -645,7 +677,7 @@ mod tests {
 
     use super::Dictionary;
     use crate::dictionary::TermOrdHit;
-    use crate::MonotonicU64SSTable;
+    use crate::{MonotonicU64SSTable, TermOrdinal};
 
     #[derive(Debug)]
     struct PermissionedHandle {
@@ -677,10 +709,9 @@ mod tests {
         fn read_bytes(&self, range: Range<usize>) -> std::io::Result<OwnedBytes> {
             let allowed_range = self.allowed_range.lock().unwrap();
             if !allowed_range.contains(&range.start) || !allowed_range.contains(&(range.end - 1)) {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("invalid range, allowed {allowed_range:?}, requested {range:?}"),
-                ));
+                return Err(std::io::Error::other(format!(
+                    "invalid range, allowed {allowed_range:?}, requested {range:?}"
+                )));
             }
 
             Ok(self.bytes.slice(range))
@@ -909,35 +940,36 @@ mod tests {
     }
 
     #[test]
-    fn test_ords_term() {
+    fn test_sorted_ords_to_term() {
         let (dic, _slice) = make_test_sstable();
 
         // Single term
         let mut terms = Vec::new();
-        assert!(dic
-            .sorted_ords_to_term_cb(100_000..100_001, |term| {
+        assert!(
+            dic.sorted_ords_to_term_cb(&[100_000], |term| {
                 terms.push(term.to_vec());
-                Ok(())
             })
-            .unwrap());
+            .unwrap()
+        );
         assert_eq!(terms, vec![format!("{:05X}", 100_000).into_bytes(),]);
         // Single term
         let mut terms = Vec::new();
-        assert!(dic
-            .sorted_ords_to_term_cb(100_001..100_002, |term| {
+        let ords: Vec<TermOrdinal> = (100_001..100_002).collect();
+        assert!(
+            dic.sorted_ords_to_term_cb(&ords, |term| {
                 terms.push(term.to_vec());
-                Ok(())
             })
-            .unwrap());
+            .unwrap()
+        );
         assert_eq!(terms, vec![format!("{:05X}", 100_001).into_bytes(),]);
         // both terms
         let mut terms = Vec::new();
-        assert!(dic
-            .sorted_ords_to_term_cb(100_000..100_002, |term| {
+        assert!(
+            dic.sorted_ords_to_term_cb(&[100_000, 100_001], |term| {
                 terms.push(term.to_vec());
-                Ok(())
             })
-            .unwrap());
+            .unwrap()
+        );
         assert_eq!(
             terms,
             vec![
@@ -947,18 +979,56 @@ mod tests {
         );
         // Test cross block
         let mut terms = Vec::new();
-        assert!(dic
-            .sorted_ords_to_term_cb(98653..=98655, |term| {
+        let ords: Vec<TermOrdinal> = (98653..=98655).collect();
+        assert!(
+            dic.sorted_ords_to_term_cb(&ords, |term| {
                 terms.push(term.to_vec());
-                Ok(())
             })
-            .unwrap());
+            .unwrap()
+        );
         assert_eq!(
             terms,
             vec![
                 format!("{:05X}", 98653).into_bytes(),
                 format!("{:05X}", 98654).into_bytes(),
                 format!("{:05X}", 98655).into_bytes(),
+            ]
+        );
+        // redundant
+        let mut terms = Vec::new();
+        let ords: Vec<TermOrdinal> = vec![1, 1, 2];
+        assert!(
+            dic.sorted_ords_to_term_cb(&ords, |term| {
+                terms.push(term.to_vec());
+            })
+            .unwrap()
+        );
+        assert_eq!(
+            terms,
+            vec![
+                format!("{:05X}", 1).into_bytes(),
+                format!("{:05X}", 1).into_bytes(),
+                format!("{:05X}", 2).into_bytes(),
+            ]
+        );
+        // redundant cross block
+        let mut terms = Vec::new();
+        let ords: Vec<TermOrdinal> = vec![98653, 98653, 98654, 98654, 98655, 98655];
+        assert!(
+            dic.sorted_ords_to_term_cb(&ords, |term| {
+                terms.push(term.to_vec());
+            })
+            .unwrap()
+        );
+        assert_eq!(
+            terms,
+            vec![
+                format!("{:05X}", 98_653).into_bytes(),
+                format!("{:05X}", 98_653).into_bytes(),
+                format!("{:05X}", 98_654).into_bytes(),
+                format!("{:05X}", 98_654).into_bytes(),
+                format!("{:05X}", 98_655).into_bytes(),
+                format!("{:05X}", 98_655).into_bytes(),
             ]
         );
     }

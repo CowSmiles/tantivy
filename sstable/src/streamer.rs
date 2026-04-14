@@ -1,8 +1,8 @@
 use std::io;
 use std::ops::Bound;
 
-use tantivy_fst::automaton::AlwaysMatch;
 use tantivy_fst::Automaton;
+use tantivy_fst::automaton::AlwaysMatch;
 
 use crate::dictionary::Dictionary;
 use crate::{DeltaReader, SSTable, TermOrdinal};
@@ -142,7 +142,7 @@ where
     }
 
     /// Same as `into_stream_async`, but tries to issue a single io operation when requesting
-    /// blocks that are not consecutive, but also less than `merge_holes_under_bytes` bytes appart.
+    /// blocks that are not consecutive, but also less than `merge_holes_under_bytes` bytes apart.
     pub async fn into_stream_async_merging_holes(
         self,
         merge_holes_under_bytes: usize,
